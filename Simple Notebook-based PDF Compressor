@@ -1,1 +1,309 @@
-{"metadata":{"kernelspec":{"language":"python","display_name":"Python 3","name":"python3"},"language_info":{"name":"python","version":"3.11.13","mimetype":"text/x-python","codemirror_mode":{"name":"ipython","version":3},"pygments_lexer":"ipython3","nbconvert_exporter":"python","file_extension":".py"},"kaggle":{"accelerator":"none","dataSources":[{"sourceId":13664915,"sourceType":"datasetVersion","datasetId":8688143}],"dockerImageVersionId":31192,"isInternetEnabled":true,"language":"python","sourceType":"notebook","isGpuEnabled":false}},"nbformat_minor":4,"nbformat":4,"cells":[{"cell_type":"code","source":" ! pip install pymupdf pillow","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2025-11-09T08:36:34.755683Z","iopub.execute_input":"2025-11-09T08:36:34.755912Z","iopub.status.idle":"2025-11-09T08:36:43.640826Z","shell.execute_reply.started":"2025-11-09T08:36:34.755892Z","shell.execute_reply":"2025-11-09T08:36:43.639614Z"}},"outputs":[{"name":"stdout","text":"Collecting pymupdf\n  Downloading pymupdf-1.26.6-cp310-abi3-manylinux_2_28_x86_64.whl.metadata (3.4 kB)\nRequirement already satisfied: pillow in /usr/local/lib/python3.11/dist-packages (11.3.0)\nDownloading pymupdf-1.26.6-cp310-abi3-manylinux_2_28_x86_64.whl (24.1 MB)\n\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m24.1/24.1 MB\u001b[0m \u001b[31m49.7 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m:00:01\u001b[0m00:01\u001b[0m\n\u001b[?25hInstalling collected packages: pymupdf\nSuccessfully installed pymupdf-1.26.6\n","output_type":"stream"}],"execution_count":1},{"cell_type":"code","source":"# --- PDF compressor helpers (PyMuPDF + Pillow) ---\n# pip install -U pymupdf pillow\n\nimport io\nfrom PIL import Image, ImageOps\nimport fitz  # PyMuPDF\n\ndef _calc_target_size(px_w, px_h, rects, max_dpi):\n    if not rects:\n        return px_w, px_h\n    w_in = max(r.width for r in rects) / 72.0\n    h_in = max(r.height for r in rects) / 72.0\n    tgt_w = max(1, int(round(w_in * max_dpi)))\n    tgt_h = max(1, int(round(h_in * max_dpi)))\n    return min(tgt_w, px_w), min(tgt_h, px_h)\n\ndef _pil_from_bytes(img_bytes):\n    im = Image.open(io.BytesIO(img_bytes))\n    im.load()\n    return im\n\ndef _to_jpeg_bytes(im, quality=70):\n    if im.mode in (\"RGBA\", \"LA\") or (im.mode == \"P\" and \"transparency\" in im.info):\n        im = ImageOps.exif_transpose(im.convert(\"RGBA\"))\n        bg = Image.new(\"RGB\", im.size, (255, 255, 255))\n        bg.paste(im, mask=im.split()[-1])\n        im = bg\n    elif im.mode not in (\"L\", \"RGB\"):\n        im = ImageOps.exif_transpose(im.convert(\"RGB\"))\n    out = io.BytesIO()\n    im.save(out, format=\"JPEG\", quality=quality, optimize=True, progressive=True)\n    return out.getvalue()\n\ndef compress_pdf(\n    input_path: str,\n    output_path: str,\n    *,\n    max_dpi: int = 150,\n    jpeg_quality: int = 70,\n    linearize: bool = True,     # kept for API compatibility; ignored if unsupported\n    skip_small: int = 24_000\n):\n    doc = fitz.open(input_path)\n    processed = set()\n\n    for page in doc:\n        for img in page.get_images(full=True):\n            xref = img[0]\n            if xref in processed:\n                continue\n            processed.add(xref)\n\n            try:\n                rects = page.get_image_rects(xref)\n                info = doc.extract_image(xref)\n                if not info:\n                    continue\n\n                img_bytes = info[\"image\"]\n                ext = (info.get(\"ext\") or \"\").lower()\n                px_w = info.get(\"width\", 0)\n                px_h = info.get(\"height\", 0)\n                bpc  = info.get(\"bpc\", 8)\n\n                if px_w * px_h == 0 or bpc == 1 or (px_w * px_h) < skip_small:\n                    continue\n\n                tgt_w, tgt_h = _calc_target_size(px_w, px_h, rects, max_dpi)\n                already_jpeg = ext in (\"jpeg\", \"jpg\", \"jpe\", \"jp2\")\n\n                if (tgt_w, tgt_h) == (px_w, px_h) and already_jpeg and jpeg_quality >= 85:\n                    continue\n\n                im = _pil_from_bytes(img_bytes)\n                if (tgt_w, tgt_h) != (px_w, px_h):\n                    im = im.resize((tgt_w, tgt_h), Image.LANCZOS)\n\n                new_stream = _to_jpeg_bytes(im, quality=jpeg_quality)\n                doc.update_image(xref, stream=new_stream)\n\n            except Exception:\n                continue\n\n    # Try linearized save if requested; fall back if not supported\n    save_kwargs = dict(deflate=True, clean=True, garbage=4, incremental=False)\n    try:\n        if linearize:\n            doc.save(output_path, **save_kwargs, linear=True)\n        else:\n            doc.save(output_path, **save_kwargs)\n    except Exception as e:\n        # If linearization not supported (FzErrorArgument), retry without it\n        doc.save(output_path, **save_kwargs)\n    finally:\n        doc.close()\n","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2025-11-09T08:40:23.706066Z","iopub.execute_input":"2025-11-09T08:40:23.706466Z","iopub.status.idle":"2025-11-09T08:40:23.724622Z","shell.execute_reply.started":"2025-11-09T08:40:23.706441Z","shell.execute_reply":"2025-11-09T08:40:23.723611Z"}},"outputs":[],"execution_count":5},{"cell_type":"code","source":"inp = \"/kaggle/input/file-pdf/Draft Laporan Magang Mandiri Indah-Naura-Figo.pdf\"  \nout = \"output_compressed.pdf\"\n\ncompress_pdf(\n    inp, out,\n    max_dpi=150,         # lower => smaller file, more blur\n    jpeg_quality=70,     # 60–75 typical for scans/photos\n    linearize=True,      # will be ignored gracefully if unsupported\n    skip_small=24_000\n)\n\nprint(\"Saved:\", out)\n","metadata":{"trusted":true,"execution":{"iopub.status.busy":"2025-11-09T08:40:39.392903Z","iopub.execute_input":"2025-11-09T08:40:39.393266Z","iopub.status.idle":"2025-11-09T08:40:44.093781Z","shell.execute_reply.started":"2025-11-09T08:40:39.393241Z","shell.execute_reply":"2025-11-09T08:40:44.092970Z"}},"outputs":[{"name":"stdout","text":"Saved: output_compressed.pdf\n","output_type":"stream"}],"execution_count":6},{"cell_type":"code","source":"","metadata":{"trusted":true},"outputs":[],"execution_count":null}]}
+{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "id": "0306ac0c",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2025-11-09T08:54:54.038598Z",
+     "iopub.status.busy": "2025-11-09T08:54:54.038152Z",
+     "iopub.status.idle": "2025-11-09T08:55:02.366280Z",
+     "shell.execute_reply": "2025-11-09T08:55:02.364909Z"
+    },
+    "papermill": {
+     "duration": 8.3345,
+     "end_time": "2025-11-09T08:55:02.368679",
+     "exception": false,
+     "start_time": "2025-11-09T08:54:54.034179",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Collecting pymupdf\r\n",
+      "  Downloading pymupdf-1.26.6-cp310-abi3-manylinux_2_28_x86_64.whl.metadata (3.4 kB)\r\n",
+      "Requirement already satisfied: pillow in /usr/local/lib/python3.11/dist-packages (11.3.0)\r\n",
+      "Downloading pymupdf-1.26.6-cp310-abi3-manylinux_2_28_x86_64.whl (24.1 MB)\r\n",
+      "\u001b[2K   \u001b[90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\u001b[0m \u001b[32m24.1/24.1 MB\u001b[0m \u001b[31m55.8 MB/s\u001b[0m eta \u001b[36m0:00:00\u001b[0m\r\n",
+      "\u001b[?25hInstalling collected packages: pymupdf\r\n",
+      "Successfully installed pymupdf-1.26.6\r\n"
+     ]
+    }
+   ],
+   "source": [
+    " ! pip install pymupdf pillow"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "id": "463a6e27",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2025-11-09T08:55:02.376782Z",
+     "iopub.status.busy": "2025-11-09T08:55:02.376370Z",
+     "iopub.status.idle": "2025-11-09T08:55:02.507780Z",
+     "shell.execute_reply": "2025-11-09T08:55:02.506481Z"
+    },
+    "papermill": {
+     "duration": 0.137802,
+     "end_time": "2025-11-09T08:55:02.509537",
+     "exception": false,
+     "start_time": "2025-11-09T08:55:02.371735",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": [
+    "# pip install -U pymupdf pillow\n",
+    "\n",
+    "import io\n",
+    "import os\n",
+    "from pathlib import Path\n",
+    "from PIL import Image, ImageOps\n",
+    "import fitz  # PyMuPDF\n",
+    "\n",
+    "def _calc_target_size(px_w, px_h, rects, max_dpi):\n",
+    "    if not rects:\n",
+    "        return px_w, px_h\n",
+    "    w_in = max(r.width for r in rects) / 72.0\n",
+    "    h_in = max(r.height for r in rects) / 72.0\n",
+    "    tgt_w = max(1, int(round(w_in * max_dpi)))\n",
+    "    tgt_h = max(1, int(round(h_in * max_dpi)))\n",
+    "    return min(tgt_w, px_w), min(tgt_h, px_h)\n",
+    "\n",
+    "def _pil_from_bytes(img_bytes):\n",
+    "    im = Image.open(io.BytesIO(img_bytes))\n",
+    "    im.load()\n",
+    "    return im\n",
+    "\n",
+    "def _to_jpeg_bytes(im, quality=70):\n",
+    "    if im.mode in (\"RGBA\", \"LA\") or (im.mode == \"P\" and \"transparency\" in im.info):\n",
+    "        im = ImageOps.exif_transpose(im.convert(\"RGBA\"))\n",
+    "        bg = Image.new(\"RGB\", im.size, (255, 255, 255))\n",
+    "        bg.paste(im, mask=im.split()[-1])\n",
+    "        im = bg\n",
+    "    elif im.mode not in (\"L\", \"RGB\"):\n",
+    "        im = ImageOps.exif_transpose(im.convert(\"RGB\"))\n",
+    "    out = io.BytesIO()\n",
+    "    im.save(out, format=\"JPEG\", quality=quality, optimize=True, progressive=True)\n",
+    "    return out.getvalue()\n",
+    "\n",
+    "def _writable_dir(preferred: Path | None = None) -> Path:\n",
+    "    \"\"\"\n",
+    "    Return a guaranteed-writable directory.\n",
+    "    Tries: preferred → CWD → /kaggle/working (if exists) → HOME.\n",
+    "    \"\"\"\n",
+    "    cands = []\n",
+    "    if preferred:\n",
+    "        cands.append(Path(preferred))\n",
+    "    cands.append(Path.cwd())\n",
+    "    wk = Path(\"/kaggle/working\")\n",
+    "    if wk.exists():\n",
+    "        cands.append(wk)\n",
+    "    home = Path.home()\n",
+    "    cands.append(home)\n",
+    "    for d in cands:\n",
+    "        try:\n",
+    "            d.mkdir(parents=True, exist_ok=True)\n",
+    "            test = d / \".write_test\"\n",
+    "            with open(test, \"w\") as f:\n",
+    "                f.write(\"ok\")\n",
+    "            test.unlink()\n",
+    "            return d\n",
+    "        except Exception:\n",
+    "            continue\n",
+    "    raise RuntimeError(\"No writable directory found.\")\n",
+    "\n",
+    "def _compressed_name(input_path: Path) -> str:\n",
+    "    stem = input_path.stem\n",
+    "    if not stem.lower().startswith(\"compressed_\"):\n",
+    "        stem = f\"compressed_{stem}\"\n",
+    "    return f\"{stem}{input_path.suffix}\"\n",
+    "\n",
+    "def compress_pdf(\n",
+    "    input_path: str | Path,\n",
+    "    output_dir: str | Path | None = None,\n",
+    "    *,\n",
+    "    max_dpi: int = 150,\n",
+    "    jpeg_quality: int = 70,\n",
+    "    skip_small: int = 24_000\n",
+    ") -> Path:\n",
+    "    \"\"\"\n",
+    "    Compress images inside a PDF and save as 'compressed_<original>.pdf'\n",
+    "    in a writable directory (never overwrites / removes the original).\n",
+    "    \"\"\"\n",
+    "    input_path = Path(input_path)\n",
+    "    # Determine safe output directory\n",
+    "    out_dir = _writable_dir(Path(output_dir) if output_dir else None)\n",
+    "    out_path = out_dir / _compressed_name(input_path)\n",
+    "\n",
+    "    doc = fitz.open(str(input_path))\n",
+    "    processed = set()\n",
+    "\n",
+    "    for page in doc:\n",
+    "        for img in page.get_images(full=True):\n",
+    "            xref = img[0]\n",
+    "            if xref in processed:\n",
+    "                continue\n",
+    "            processed.add(xref)\n",
+    "\n",
+    "            try:\n",
+    "                rects = page.get_image_rects(xref)\n",
+    "                info = doc.extract_image(xref)\n",
+    "                if not info:\n",
+    "                    continue\n",
+    "\n",
+    "                img_bytes = info[\"image\"]\n",
+    "                ext = (info.get(\"ext\") or \"\").lower()\n",
+    "                px_w = info.get(\"width\", 0)\n",
+    "                px_h = info.get(\"height\", 0)\n",
+    "                bpc  = info.get(\"bpc\", 8)\n",
+    "\n",
+    "                if px_w * px_h == 0 or bpc == 1 or (px_w * px_h) < skip_small:\n",
+    "                    continue\n",
+    "\n",
+    "                tgt_w, tgt_h = _calc_target_size(px_w, px_h, rects, max_dpi)\n",
+    "                already_jpeg = ext in (\"jpeg\", \"jpg\", \"jpe\", \"jp2\")\n",
+    "\n",
+    "                if (tgt_w, tgt_h) == (px_w, px_h) and already_jpeg and jpeg_quality >= 85:\n",
+    "                    continue\n",
+    "\n",
+    "                im = _pil_from_bytes(img_bytes)\n",
+    "                if (tgt_w, tgt_h) != (px_w, px_h):\n",
+    "                    im = im.resize((tgt_w, tgt_h), Image.LANCZOS)\n",
+    "\n",
+    "                new_stream = _to_jpeg_bytes(im, quality=jpeg_quality)\n",
+    "                doc.update_image(xref, stream=new_stream)\n",
+    "            except Exception:\n",
+    "                # Skip problematic images, keep the rest\n",
+    "                continue\n",
+    "\n",
+    "    # Save WITHOUT linearization (new PyMuPDF removes it)\n",
+    "    save_kwargs = dict(deflate=True, clean=True, garbage=4, incremental=False)\n",
+    "    doc.save(str(out_path), **save_kwargs)\n",
+    "    doc.close()\n",
+    "    return out_path\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "id": "502f9a9d",
+   "metadata": {
+    "execution": {
+     "iopub.execute_input": "2025-11-09T08:55:02.515955Z",
+     "iopub.status.busy": "2025-11-09T08:55:02.515644Z",
+     "iopub.status.idle": "2025-11-09T08:55:15.587891Z",
+     "shell.execute_reply": "2025-11-09T08:55:15.586497Z"
+    },
+    "papermill": {
+     "duration": 13.077644,
+     "end_time": "2025-11-09T08:55:15.589697",
+     "exception": false,
+     "start_time": "2025-11-09T08:55:02.512053",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Saved to: /kaggle/working/compressed_Laporan Akhir dan Draft Laporan KP Isnaeni-Anisa.pdf\n"
+     ]
+    }
+   ],
+   "source": [
+    "inp = \"/kaggle/input/laporan-kp-2/Laporan Akhir dan Draft Laporan KP Isnaeni-Anisa.pdf\"\n",
+    "\n",
+    "out_path = compress_pdf(\n",
+    "    inp,\n",
+    "    output_dir=None,   \n",
+    "    max_dpi=150, #smaller dpi ~ smaller pdf\n",
+    "    jpeg_quality=70,\n",
+    "    skip_small=24_000\n",
+    ")\n",
+    "\n",
+    "print(\"Saved to:\", out_path)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "880579cf",
+   "metadata": {
+    "papermill": {
+     "duration": 0.002353,
+     "end_time": "2025-11-09T08:55:15.594550",
+     "exception": false,
+     "start_time": "2025-11-09T08:55:15.592197",
+     "status": "completed"
+    },
+    "tags": []
+   },
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kaggle": {
+   "accelerator": "none",
+   "dataSources": [
+    {
+     "datasetId": 8688143,
+     "sourceId": 13664915,
+     "sourceType": "datasetVersion"
+    },
+    {
+     "datasetId": 8688215,
+     "sourceId": 13665012,
+     "sourceType": "datasetVersion"
+    }
+   ],
+   "dockerImageVersionId": 31192,
+   "isGpuEnabled": false,
+   "isInternetEnabled": true,
+   "language": "python",
+   "sourceType": "notebook"
+  },
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.11.13"
+  },
+  "papermill": {
+   "default_parameters": {},
+   "duration": 27.320616,
+   "end_time": "2025-11-09T08:55:16.016981",
+   "environment_variables": {},
+   "exception": null,
+   "input_path": "__notebook__.ipynb",
+   "output_path": "__notebook__.ipynb",
+   "parameters": {},
+   "start_time": "2025-11-09T08:54:48.696365",
+   "version": "2.6.0"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
